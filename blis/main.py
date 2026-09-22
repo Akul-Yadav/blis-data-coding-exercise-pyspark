@@ -115,21 +115,28 @@ def get_activity_sessions_per_user(
         add_activity_lookup(input_df, lookup_df)
     )
 
-    user_timeline = Window.partitionBy("user_id").orderBy("event_time")
+    input_with_activity_code = input_with_activity_code.withColumn(
+        "event_time_micros", F.col("timestamp").cast("long")
+    )
+
+    user_timeline = Window.partitionBy("user_id").orderBy("event_time_micros")
     user_timeline_to_current = user_timeline.rowsBetween(
         Window.unboundedPreceding, Window.currentRow
     )
 
     sessionized = (
         input_with_activity_code
-        .withColumn("previous_event_time", F.lag("event_time").over(user_timeline))
+        .withColumn(
+            "previous_event_time_micros",
+            F.lag("event_time_micros").over(user_timeline),
+        )
         .withColumn(
             "starts_new_session",
-            F.when(F.col("previous_event_time").isNull(), 1)
+            F.when(F.col("previous_event_time_micros").isNull(), 1)
             .when(
-                F.col("event_time").cast("long")
-                - F.col("previous_event_time").cast("long")
-                >= SESSION_GAP_SECONDS,
+                F.col("event_time_micros")
+                - F.col("previous_event_time_micros")
+                >= SESSION_GAP_SECONDS * MICROSECONDS_IN_SECOND,
                 1,
             )
             .otherwise(0),
@@ -144,14 +151,15 @@ def get_activity_sessions_per_user(
         .groupBy("user_id", "session_id")
         .agg(
             F.min("event_time").alias("session_start"),
-            F.max("event_time").alias("session_end"),
+            F.min("event_time_micros").alias("session_start_micros"),
+            F.max("event_time_micros").alias("session_end_micros"),
         )
         .select(
             F.to_date("session_start").alias("session_start_date"),
             "user_id",
             (
-                (F.col("session_end").cast("long") - F.col("session_start").cast("long"))
-                / F.lit(60.0)
+                (F.col("session_end_micros") - F.col("session_start_micros"))
+                / F.lit(60.0 * MICROSECONDS_IN_SECOND)
             ).alias("session_time_in_mins"),
         )
     )
